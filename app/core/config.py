@@ -35,6 +35,13 @@ class DatabaseSettings(BaseSettings):
     PASSWORD: str = "postgres"
     DB: str = "tutorial"
 
+    # 连接池配置
+    POOL_SIZE: int = 10
+    MAX_OVERFLOW: int = 20
+    POOL_TIMEOUT: int = 30
+    POOL_RECYCLE: int = 3600
+    ECHO: bool = False
+
     # 使用 @computed_field，可以在模型内部根据其他字段动态生成新字段
     # 这比在模型外部手动拼接字符串要优雅得多。
     @computed_field
