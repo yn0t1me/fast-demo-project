@@ -10,3 +10,7 @@ build/
 dist/
 wheels/
 *.egg-info/
+
+# 忽略所有以 .env. 开头的文件，如 .env.dev, .env.prod，排除 .env.sample
+.env.* 
+!.env.sample
