@@ -852,3 +852,249 @@ uv run --env-file env.dev -- fastapi dev
 5. **连接池管理**：可配置的连接池参数，优化性能
 6. **异常处理**：自动回滚失败的事务，确保数据一致性
 7. **环境隔离**：支持不同环境使用不同的数据库配置
+
+## 用 SQLAlchemy ORM 定义你的第一张数据表
+
+基于 SQLAlchemy 2.0 现代化语法，从零开始定义健壮的数据模型，学习 Pydantic 模型与 ORM 的无缝协作，掌握 Mixin 模式编写可复用时间字段的高级技巧。
+
+
+### 规范化项目结构
+
+在上一章，为了快速演示，我们把 ORM 的基类 Base 放在了数据库连接文件里。这对于小型项目来说没问题，但随着项目变大，更好的做法是将所有与数据模型相关的代码集中管理。
+
+#### 创建 models 目录结构
+
+```bash
+mkdir -p app/models
+mkdir -p app/schemas
+touch app/models/__init__.py
+touch app/schemas/__init__.py
+```
+
+我们将在 app/ 目录下创建如下结构：
+
+```
+app/
+├── models/          # 数据库模型（ORM）
+│   ├── __init__.py  # 让 models 成为一个 Python 包
+│   ├── base.py      # 存放我们的 ORM 基类
+│   ├── mixin.py     # 可复用的 Mixin 类
+│   └── user.py      # 存放 User 模型
+└── schemas/         # API 模型（Pydantic）
+    ├── __init__.py
+    └── user.py      # 用户相关的 Pydantic 模式
+```
+
+#### 创建 ORM 基类
+
+在 `app/models/base.py` 中定义所有 ORM 模型的基础类：
+
+```python
+# app/models/base.py
+from sqlalchemy.orm import DeclarativeBase
+
+# 定义所有 ORM 模型的基础类
+class Base(DeclarativeBase):
+    pass
+```
+
+将 Base 单独放在这里，意味着所有的数据模型都有一个统一的、可追溯的源头。
+
+### 定义 User 模型
+
+现在，我们来定义绝大多数应用的核心——用户模型。在 `app/models/user.py` 中：
+
+```python
+# app/models/user.py
+from typing import Optional
+
+from sqlalchemy import String
+from sqlalchemy.orm import Mapped, mapped_column
+from .base import Base # 从同级目录的 base.py 导入 Base
+from app.models.mixin import DateTimeMixin  # 导入 Mixin
+
+
+class User(Base, DateTimeMixin):  # 同时继承，顺序不重要
+    __tablename__ = "users" # 数据库中的表名
+    
+    # Mapped[...] 是 SQLAlchemy 2.0 的核心语法，用于类型注解
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(
+        String(64), index=True, unique=True, nullable=False
+    )
+    password_hash: Mapped[Optional[str]] = mapped_column(String(256))
+
+    # 一个好的习惯：定义 __repr__ 方法，方便调试时打印对象信息
+    def __repr__(self) -> str:
+        return f"<User(id={self.id}, username='{self.username}')>"
+```
+
+**代码解析：**
+
+- `__tablename__`: 明确告诉 SQLAlchemy，这个类对应数据库中的 users 表
+- `Mapped[type]`: 这是 SQLAlchemy 2.0 的标志性语法。它结合了 Python 的类型提示，让编辑器和静态分析工具能更好地理解你的代码
+- `mapped_column()`: 这是定义列属性的核心函数
+- `primary_key=True`: 将 id 设为主键
+- `autoincrement=True`: id 会自动增长
+- `String(64)`: 定义了一个最大长度为 64 的字符串，对应 SQL 中的 VARCHAR(64)
+- `index=True`: 为 username 创建索引，加快查询速度
+- `unique=True`: 保证所有用户的 username 都是唯一的
+- `nullable=False`: username 字段不允许为空
+
+### 创建 Pydantic 模式
+
+数据库模型（ORM）和 API 模型（Pydantic）应分离。我们的 User 模型是为数据库存储而设计的，它包含了像 password_hash 这样的敏感信息。在 API 交互中，我们绝不希望将密码哈希直接返回给前端。
+
+在 `app/schemas/user.py` 中创建 API 专用的数据模型：
+
+```python
+# app/schemas/user.py
+from pydantic import BaseModel
+
+# 基础模型，包含所有用户共有的字段
+class UserBase(BaseModel):
+    username: str
+
+# 创建用户时，从请求体中读取的模型
+# 需要提供密码
+class UserCreate(UserBase):
+    password: str
+
+# 从数据库读取并返回给客户端的模型
+# 不应该包含密码，但应该包含 id
+class UserResponse(UserBase):
+    id: int
+    # Pydantic V2 的新配置方式
+    class Config:
+        from_attributes = True  # 告诉 Pydantic 模型可以从 ORM 对象属性中读取数据
+
+```
+
+**模式说明：**
+
+- `UserBase`: 包含用户的基础字段，其他模式可以继承它
+- `UserCreate`: 用于创建用户的请求体，包含密码字段
+- `UserResponse`: 用于返回给客户端的响应，不包含敏感信息
+
+### 使用 Mixin 模式实现可复用时间字段
+
+在实际项目中，几乎每个表都需要 `created_at` 和 `updated_at` 字段。我们希望这些时间戳绝对精确，且不受应用服务器时钟偏差的影响。最佳实践是：将时间管理完全交给数据库服务器。
+这时，“混入”（Mixin）模式就登场了。我们创建一个专门的 DateTimeMixin 类来封装这个逻辑，避免重复代码。
+
+在 `app/models/mixin.py` 中创建时间字段 Mixin：
+
+```python
+# app/models/mixin.py
+from datetime import datetime  
+
+from sqlalchemy import func
+from sqlalchemy import DateTime
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.dialects.postgresql import TIMESTAMP  
+
+class DateTimeMixin:
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),     # 用 PostgreSQL 方言，等价于 DateTime(timezone=True)
+        # DateTime(timezone=True),    # 更通用的写法，你可以直接使用这个，去掉上面的 TIMESTAMP
+        server_default=func.now(),    # 插入时由 PG 生成，采用服务器时间        
+        insert_sentinel=False,        # 禁止 ORM 隐式写入
+        nullable=False,               # 不允许为空  
+        index=True,                   # 可通过创建时间索引
+    )  
+
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),     # 用 PostgreSQL 方言，等价于 DateTime(timezone=True) 
+        # DateTime(timezone=True),    # 更通用的写法，你可以直接使用这个，去掉上面的 TIMESTAMP
+        server_default=func.now(),    # 插入时由 PG 生成，采用服务器时间
+        onupdate=func.now(),          # 更新时由 PG 刷新，采用服务器时间        
+        insert_sentinel=False,        # 禁止 ORM 隐式写入
+        nullable=False,
+    )
+```
+
+**Mixin 特性说明：**
+
+- `server_default=func.now()`: 创建一条新记录时，该字段的默认值由数据库服务器(数据库服务器单一，保证所有时间戳的绝对权威和统一)的 NOW() 函数生成，确保时间的准确性
+- `onupdate=func.now()`: 每次更新记录时由数据库服务器自动刷新 updated_at 字段
+- `insert_sentinel=False`: 禁止 ORM 在插入时隐式写入时间值
+- `TIMESTAMP(timezone=True)`:  PostgreSQL 方言中的类型，使用带时区的时间戳，避免时区问题
+
+### 更新数据库连接模块
+
+为了解决数据表创建问题，我们需要确保所有模型都被正确导入和注册。
+
+#### 更新 models 包的 __init__.py
+
+在 `app/models/__init__.py` 中导入所有模型：
+
+```python
+# app/models/__init__.py
+
+# 导入 Base，它是所有模型的基础
+from .base import Base
+# 导入你所有的模型，确保它们被 Base.metadata 识别
+from .user import User
+# 如果未来有其他模型，比如 Post, Item，也在这里导入
+# from .post import Post
+# from .item import Item
+
+# 可选：使用 __all__ 来明确声明这个包对外暴露的接口
+# 这是一种良好的编程习惯
+__all__ = ["Base", "User"]
+```
+
+#### 修复数据库会话模块
+
+更新 `app/db/session.py`，使用统一的 Base 类：
+
+```python
+# 在文件顶部，移除原来的 Base 定义，改为导入
+from app.models.base import Base
+```
+
+#### 更新主应用文件
+
+在 `app/main.py` 中导入模型包，确保所有模型被注册：
+
+```python
+# 在导入部分添加
+# 导入所有模型，确保它们被注册到 Base.metadata 中
+import app.models
+```
+
+### 数据库表创建和测试
+
+#### 启动 PostgreSQL 数据库
+
+使用 Docker 启动 PostgreSQL 容器：
+
+```bash
+docker run --name postgres-demo \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=tutorial \
+  -p 5432:5432 \
+  -d postgres:15
+```
+
+#### 运行应用并创建表
+
+启动开发服务器：
+
+```bash
+uv run --env-file env.dev -- fastapi dev
+```
+
+应用启动时会自动创建数据库表（在开发环境中）。
+打开数据库连接工具查看生成的数据表
+
+### 核心特性总结
+
+我们构建的 ORM 数据层具有以下特性：
+
+1. **现代化语法**: 使用 SQLAlchemy 2.0 的 `Mapped` 和 `mapped_column` 语法
+2. **类型安全**: 完整的类型注解支持，提供更好的 IDE 体验
+3. **模块化设计**: 清晰的目录结构，分离关注点
+4. **可复用组件**: Mixin 模式实现通用字段的复用
+5. **API 安全**: Pydantic 模式确保敏感数据不会意外暴露
+6. **自动化时间管理**: 数据库服务器自动管理时间字段
+7. **开发友好**: 自动表创建和测试端点，便于开发调试

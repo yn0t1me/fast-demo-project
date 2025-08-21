@@ -13,6 +13,8 @@ from app.db.session import (
     create_db_and_tables,
     get_db,
 )
+# 导入所有模型，确保它们被注册到 Base.metadata 中
+import app.models
 
 # 使用 lifespan 管理应用生命周期事件
 @asynccontextmanager

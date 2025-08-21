@@ -6,17 +6,14 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
     AsyncEngine,
 )
-from sqlalchemy.orm import DeclarativeBase
 from loguru import logger
 from app.core.config import settings
+# 导入统一的 Base 类
+from app.models.base import Base
 
 # --- 1. 核心组件：全局引擎与会话工厂 ---
 _engine: Optional[AsyncEngine] = None
 _SessionFactory: Optional[async_sessionmaker[AsyncSession]] = None
-
-# 基类，我们所有的 ORM 模型都需要继承它
-class Base(DeclarativeBase):
-    pass
 
 # --- 2. 生命周期钩子：初始化与关闭 ---
 async def setup_database_connection():
