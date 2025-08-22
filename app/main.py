@@ -17,6 +17,7 @@ from app.db.session import (
 import app.models
 # 导入全局异常处理函数
 from app.core.exceptions import global_exception_handler
+from app.api.v1 import heroes_route # 导入我们创建的路由模块
 
 # 使用 lifespan 管理应用生命周期事件
 @asynccontextmanager
@@ -48,7 +49,8 @@ app = FastAPI(
 # 将 global_exception_handler 注册为处理所有 Exception 类型（及其子类）的处理器
 # 这会捕获所有类型为 Exception 的异常
 app.add_exception_handler(Exception, global_exception_handler)
-
+# 将英雄路由注册到主应用中
+app.include_router(heroes_route.router, prefix="/api/v1")
 
 @app.get("/")
 def read_root(
