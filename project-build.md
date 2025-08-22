@@ -2036,3 +2036,456 @@ app.include_router(heroes_route.router, prefix="/api/v1")
 4. **RESTful 设计**: 遵循 REST API 设计原则
 5. **文档自动生成**: FastAPI 自动生成 OpenAPI 文档
 
+## 用 Alembic 配置数据库迁移入门指南
+
+在上一章中，我们成功构建了完整的 API 路由层，实现了从 HTTP 请求到底层数据库操作、再到优雅 JSON 响应的完整工作闭环。我们的项目，从一个想法，真正变成了可交互、可使用的服务。但随着项目"活"起来，一个更严肃、更具挑战性的问题也浮出水面：我们该如何管理我们数据库的"生命"？
+
+### 从临时方案到专业级数据库管理
+
+在项目初期，我们使用 `create_db_and_tables()` 函数来创建数据库表，这种方式简单直接，但随着项目发展，它的局限性逐渐暴露：
+
+**现有方案的问题**：
+- **单向操作**：只能创建表，无法处理结构变更
+- **缺乏版本控制**：无法追踪数据库结构的演进历史
+- **环境不一致**：开发、测试、生产环境可能出现结构差异
+- **安全风险**：应用程序拥有过高的数据库权限
+
+**真实场景挑战**：
+假设我们的 `Hero` 模型需要添加 `powers` 字段来描述英雄能力。在生产环境中，数据库已存储大量数据，我们需要：
+- 安全地修改表结构
+- 保证数据完整性
+- 确保所有环境同步更新
+- 提供回滚机制
+
+这时，我们需要引入专业的数据库迁移工具 —— **Alembic**。
+
+### Alembic 核心概念与架构
+
+**什么是 Alembic？**
+Alembic 是 SQLAlchemy 作者开发的轻量级数据库迁移工具，专门用于管理数据库结构的版本化变更。
+
+**核心特性**：
+- **版本化管理**：每个变更都有唯一标识符
+- **自动生成**：基于模型变化自动生成迁移脚本
+- **双向操作**：支持升级（upgrade）和降级（downgrade）
+- **异步支持**：完美适配 FastAPI 的异步架构
+
+### 安装与初始化
+
+**1. 安装 Alembic**
+
+```bash
+uv add alembic
+```
+
+**2. 初始化异步环境**
+```bash
+alembic init -t async alembic
+```
+
+关键参数解析：
+- `-t async`：使用异步模板，适配我们的 `AsyncSession`
+- `alembic`：创建的配置目录名（业界标准约定）
+
+**3. 目录结构**
+```
+fastapi-demo-project/
+├── alembic/
+│   ├── versions/          # 迁移脚本存放目录
+│   ├── env.py            # 环境配置文件
+│   ├── script.py.mako    # 迁移脚本模板
+│   └── README
+├── alembic.ini           # 主配置文件
+└── ...
+
+```
+
+### 配置 env.py：连接模型与数据库
+
+```python
+import asyncio
+from logging.config import fileConfig
+
+from sqlalchemy import pool
+from sqlalchemy.engine import Connection
+from sqlalchemy.ext.asyncio import async_engine_from_config
+
+from alembic import context
+
+
+# ----------------- 我们改造的起点 -----------------
+import os
+import sys
+from pathlib import Path
+
+# 步骤1：将项目根目录加入 Python 的模块搜索路径
+# 这确保了 Alembic 能找到我们 app 目录下的代码
+project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root))
+
+# 步骤2：动态加载 .env 文件，让配置与环境同步
+# 这让我们可以用类似 `ENVIRONMENT=prod alembic upgrade head` 的方式来操作不同数据库
+ENV = os.getenv("ENVIRONMENT", "dev")
+dotenv_file = project_root / f".env.{ENV}"
+
+from dotenv import load_dotenv
+load_dotenv(dotenv_file)
+
+# 步骤3：导入我们的配置和模型定义的 Base
+# 这是最关键的一步，让 Alembic 知道我们的数据库在哪，以及我们的模型长什么样
+from app.core.config import Settings
+from app.models import Base # 这会触发 app/models/__init__.py, 进而加载所有模型
+
+# 实例化我们的配置
+settings = Settings()
+# ----------------- 我们改造的终点 -----------------
+
+
+# this is the Alembic Config object, which provides
+# access to the values within the .ini file in use.
+# 这是 Alembic 的配置对象，我们将把数据库 URL 注入进去
+config = context.config
+
+# ----------------- 注入数据库 URL -----------------
+# 用我们从 settings 中读取的 URL 覆盖 alembic.ini 中的默认值
+config.set_main_option("sqlalchemy.url", settings.DB.DATABASE_URL)
+# ----------------------------------------------------
+
+# Interpret the config file for Python logging.
+# This line sets up loggers basically.
+# 从配置文件中解释日志配置。
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+
+# add your model's MetaData object here
+# for 'autogenerate' support
+# from myapp import mymodel
+# target_metadata = mymodel.Base.metadata
+# 这是 Alembic 进行比对的"最终蓝图"
+target_metadata = Base.metadata
+
+# other values from the config, defined by the needs of env.py,
+# can be acquired:
+# my_important_option = config.get_main_option("my_important_option")
+# ... etc.
+
+
+def run_migrations_offline() -> None:
+    """Run migrations in 'offline' mode.
+
+    This configures the context with just a URL
+    and not an Engine, though an Engine is acceptable
+    here as well.  By skipping the Engine creation
+    we don't even need a DBAPI to be available.
+
+    Calls to context.execute() here emit the given string to the
+    script output.
+
+    """
+    url = config.get_main_option("sqlalchemy.url")
+    context.configure(
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+    )
+
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def do_run_migrations(connection: Connection) -> None:
+    context.configure(connection=connection, target_metadata=target_metadata)
+
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+async def run_async_migrations() -> None:
+    """In this scenario we need to create an Engine
+    and associate a connection with the context.
+
+    """
+
+    connectable = async_engine_from_config(
+        config.get_section(config.config_ini_section, {}),
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+
+    async with connectable.connect() as connection:
+        await connection.run_sync(do_run_migrations)
+
+    await connectable.dispose()
+
+
+def run_migrations_online() -> None:
+    """Run migrations in 'online' mode."""
+
+    asyncio.run(run_async_migrations())
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
+
+```
+
+
+
+`env.py` 是 Alembic 的核心配置文件，负责：
+
+- 连接数据库
+- 加载模型元数据
+- 配置迁移环境
+
+**关键配置点**：
+
+**1. 导入模型基类**
+
+ `app/models/__init__.py` 文件会被执行，它像一个“模型登记员”，将我们所有的模型都加载了进来
+
+```python
+# alembic/env.py
+from app.models import Base  # 导入我们的模型基类
+
+# app/models/__init__.py
+from .base import Base
+from .users import User
+from .heroes import Hero
+
+__all__ = ["Base", "User", "Hero"]
+```
+
+**2. 设置目标元数据**
+
+它把我们所有 SQLAlchemy 模型（继承自 `Base`）的结构信息集合——`metadata`——交给了 Alembic
+
+Alembic 会将这份“代码里的最终蓝图”与“数据库里的实际建筑”进行比对，从而发现差异
+
+```python
+# 将 target_metadata 从 None 改为 Base.metadata
+target_metadata = Base.metadata
+```
+
+**3. 数据库连接配置**
+
+```python
+# 从设置中获取数据库 URL
+from app.core.settings import settings
+config.set_main_option("sqlalchemy.url", settings.database_url)
+```
+
+这样配置后，Alembic 就能：
+- 自动发现所有继承自 `Base` 的模型
+- 比较当前模型与数据库的差异
+- 生成相应的迁移脚本
+
+
+
+### 迁移工作流：从生成到应用
+
+**1. 生成初始迁移**
+```bash
+uv run alembic revision --autogenerate -m "Initial migration"
+```
+
+**命令解析**：
+- `revision`：创建新的迁移版本
+- `--autogenerate`：自动检测 `target_metadata` 和数据库之间的差异，并生成相应的 Python 迁移代码。
+- `-m`：添加描述性消息（强烈建议使用有意义的描述）
+
+**2. 检查生成的迁移文件**
+
+```python
+"""Initial migration
+
+Revision ID: 736113213a43
+Revises: 
+Create Date: 2025-08-23 04:07:49.727670
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
+
+# revision identifiers, used by Alembic.
+revision: str = '736113213a43'
+down_revision: Union[str, Sequence[str], None] = None
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    """Upgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.create_table('heroes',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('name', sa.String(length=100), nullable=False),
+    sa.Column('alias', sa.String(length=100), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_heroes_alias'), 'heroes', ['alias'], unique=True)
+    op.create_index(op.f('ix_heroes_id'), 'heroes', ['id'], unique=False)
+    op.create_table('users',
+    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+    sa.Column('username', sa.String(length=64), nullable=False),
+    sa.Column('password_hash', sa.String(length=256), nullable=True),
+    sa.Column('created_at', postgresql.TIMESTAMP(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('updated_at', postgresql.TIMESTAMP(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_users_created_at'), 'users', ['created_at'], unique=False)
+    op.create_index(op.f('ix_users_username'), 'users', ['username'], unique=True)
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    """Downgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_index(op.f('ix_users_username'), table_name='users')
+    op.drop_index(op.f('ix_users_created_at'), table_name='users')
+    op.drop_table('users')
+    op.drop_index(op.f('ix_heroes_id'), table_name='heroes')
+    op.drop_index(op.f('ix_heroes_alias'), table_name='heroes')
+    op.drop_table('heroes')
+    # ### end Alembic commands ###
+
+```
+
+**3. 应用迁移**
+
+```bash
+# 升级到最新版本：这条命令会运行刚才生成的迁移脚本中的 upgrade() 函数。
+uv run alembic upgrade head
+
+# 查看当前版本
+uv run alembic current
+
+# 查看迁移历史
+uv run alembic history --verbose
+```
+
+首次迁移执行成功后，会发现数据库中多了一个陌生的 `alembic_version` 表。它里面只存一行数据，记录了当前数据库已经应用到的最新迁移版本的 ID，每次你运行 `upgrade` 或 `downgrade`，Alembic 都会先查这个表，来确定自己应该从哪个版本开始工作，并将最终的版本号记录下来。这保证了迁移操作绝不会重复执行，安全可靠。
+
+
+
+### 实战演示：为 Hero 添加 powers 字段
+
+让我们通过一个完整的例子，演示如何安全地为现有模型添加新字段。
+
+**场景**：为 `Hero` 模型添加 `powers` 字段来描述英雄能力
+
+**步骤 1：修改模型定义**
+```python
+# app/models/heroes.py
+from sqlalchemy import String, Integer, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.models.base import Base
+
+class Hero(Base):
+    __tablename__ = "heroes"
+    # 一个英雄的表，包含了名字以及称号两个字段
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    alias: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    # 💡 新增一个 powers 字段，注意它必须是可选的！
+    powers: Mapped[str | None] = mapped_column(Text, nullable=True) # 使用Text可以存储更长的文本
+
+    def __repr__(self) -> str:
+        return f"<Hero(id={self.id!r}, name={self.name!r}, alias={self.alias!r})>"
+```
+
+**步骤 2：生成迁移脚本**
+```bash
+uv run alembic revision --autogenerate -m "Add powers field to Hero model"
+```
+
+**步骤 3：检查生成的迁移**
+```python
+"""Add powers column to heroes table
+
+Revision ID: 309a4ffb61af
+Revises: 736113213a43
+Create Date: 2025-08-23 04:10:37.137010
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = '309a4ffb61af'
+down_revision: Union[str, Sequence[str], None] = '736113213a43'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    """Upgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.add_column('heroes', sa.Column('powers', sa.Text(), nullable=True))
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    """Downgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_column('heroes', 'powers')
+    # ### end Alembic commands ###
+
+```
+
+**步骤 4：应用迁移**
+```bash
+# 先在开发环境测试
+uv run alembic upgrade head
+
+# 验证结果
+uv run alembic current
+```
+
+
+
+
+
+**步骤 5：回退版本**
+如果你发现这次升级有问题，可以使用Alembic撤销它？ 
+
+```python
+uv run alembic downgrade -1
+```
+
+`downgrade -1` 意味着“回退一个版本”。执行它，Alembic 会找到上一个版本的迁移脚本，并执行里面的 `downgrade()` 函数，在这里就是删除 `powers` 字段，同时更新 `alembic_version` 表。就像这次变更从未发生过一样！
+
+- 如果想一次回退 N 个版本，用 `-N`，例如 `-2`。
+- 也可以直接指定目标 revision 号：`alembic downgrade <revision_id>`。
+
+
+
+### 常用命令速查
+
+```bash
+# 基础操作
+uv run alembic current                    # 查看当前版本
+uv run alembic history --verbose          # 详细历史
+uv run alembic show <revision>            # 查看特定迁移
+
+# 迁移操作
+uv run alembic upgrade head              # 升级到最新
+uv run alembic upgrade +1                # 升级一个版本
+uv run alembic downgrade -1              # 回滚一个版本
+uv run alembic downgrade base            # 回滚到初始状态
+
+# 预览操作
+uv run alembic upgrade head --sql        # 查看 SQL 不执行
+uv run alembic check                     # 检查模型与数据库一致性
+```
+
+Alembic 的能力远不止于此。对于更复杂的场景，比如需要进行数据回填（给老数据的 `powers` 列填充默认值）、处理复杂的外键约束变更等，就需要我们手动去编写迁移脚本的逻辑
