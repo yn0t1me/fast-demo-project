@@ -1098,3 +1098,196 @@ uv run --env-file env.dev -- fastapi dev
 5. **API 安全**: Pydantic 模式确保敏感数据不会意外暴露
 6. **自动化时间管理**: 数据库服务器自动管理时间字段
 7. **开发友好**: 自动表创建和测试端点，便于开发调试
+
+## 优雅地处理错误，构建强大的自定义异常系统
+
+在真实的应用中，错误处理是不可避免的核心主题。用户可能查询不存在的资源、尝试注册已占用的用户名，或者数据库连接突然失败。我们需要构建一套健壮而优雅的异常处理机制，作为应用的"免疫系统"。
+
+### 为什么要自定义异常？
+
+FastAPI 自带的 `HTTPException` 虽然方便，但在大型项目中会遇到以下问题：
+
+1. **代码重复**：在各个角落重复写 `status_code=404`、`status_code=409`
+2. **职责不清**：业务逻辑与表现层逻辑混合(业务逻辑（例如，“找不到某个项目”）和表现层逻辑（“应该返回 404 状态码”）混在了一起)，深层业务代码不应关心 HTTP 状态码
+3. **语义模糊**：`HTTPException(status_code=404)` 远不如 `ItemNotFoundException` 清晰易读
+
+### 设计业务异常体系
+
+我们的目标是在代码中写 `raise UserNotFoundException()`，然后让 FastAPI 自动转换成标准的 HTTP 404 响应。
+
+
+#### 创建异常处理模块
+
+在 `app/core/exceptions.py` 中创建自定义异常系统：
+
+```python
+# app/core/exceptions.py
+from fastapi import HTTPException, Request, status
+from fastapi.responses import JSONResponse
+from loguru import logger
+
+# ------------------ 业务异常: 继承自 HTTPException，所以 FastAPI 能直接处理 ------------------
+
+class NotFoundException(HTTPException):
+    def __init__(self, detail: str = "Resource not found"):
+        super().__init__(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
+
+class AlreadyExistsException(HTTPException):
+    def __init__(self, detail: str = "Resource already exists"):
+        super().__init__(status_code=status.HTTP_409_CONFLICT, detail=detail)
+
+class UnauthorizedException(HTTPException):
+    def __init__(self, detail: str = "Unauthorized access"):
+        super().__init__(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
+
+class ForbiddenException(HTTPException):
+    def __init__(self, detail: str = "Access forbidden"):
+        super().__init__(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+# ------------------ 全局兜底: 捕获所有未被处理的异常 ------------------
+
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    # 使用 loguru 记录详细的异常信息，包括堆栈跟踪
+    logger.exception(f"Unhandled exception at {request.url.path}: {exc}")
+    # 向客户端返回一个通用的、安全的错误信息
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+    )
+```
+
+**代码解析：**
+- **业务异常**：继承自 FastAPI 的 `HTTPException`，FastAPI 内置错误处理中间件能识别它们
+- **预设状态码**：在 `__init__` 方法中预设状态码和默认提示信息，也可以自定义提示信息：raise NotFoundException(detail="Hero with id 123 not found")
+- **全局兜底**：`global_exception_handler` 捕获所有未处理的异常，记录详细日志并返回安全的错误信息
+
+#### 注册全局异常处理器
+
+在 `app/main.py` 中注册异常处理器：
+
+```python
+# 导入全局异常处理函数
+from app.core.exceptions import global_exception_handler
+
+app = FastAPI(
+    title=settings.APP_NAME,
+    description="这是一个 FastAPI 演示项目",
+    version=get_project_version(),
+    lifespan=lifespan
+)
+
+# 将 global_exception_handler 注册为处理所有 Exception 类型（及其子类）的处理器
+# 这会捕获所有类型为 Exception 的异常
+app.add_exception_handler(Exception, global_exception_handler)
+```
+
+#### 添加异常测试端点
+
+为了验证异常处理系统，我们添加一些测试端点：
+
+```python
+# --- 异常处理测试端点 ---
+from app.core.exceptions import (
+    NotFoundException,
+    AlreadyExistsException,
+    UnauthorizedException,
+    ForbiddenException,
+)
+
+@app.get("/test-exceptions/not-found")
+async def test_not_found():
+    """
+    测试 404 异常处理
+    """
+    raise NotFoundException("测试资源未找到")
+
+@app.get("/test-exceptions/already-exists")
+async def test_already_exists():
+    """
+    测试 409 冲突异常处理
+    """
+    raise AlreadyExistsException("测试资源已存在")
+
+@app.get("/test-exceptions/unauthorized")
+async def test_unauthorized():
+    """
+    测试 401 未授权异常处理
+    """
+    raise UnauthorizedException("测试未授权访问")
+
+@app.get("/test-exceptions/forbidden")
+async def test_forbidden():
+    """
+    测试 403 禁止访问异常处理
+    """
+    raise ForbiddenException("测试禁止访问")
+
+@app.get("/test-exceptions/server-error")
+async def test_server_error():
+    """
+    测试 500 服务器错误异常处理（全局异常处理器）
+    ValueError 是 Python 的标准异常， 不是 HTTPException 的子类，FastAPI 无法直接处理非 HTTPException 类型的异常
+    FastAPI 会将其传递给全局异常处理器
+    """
+    # 故意抛出一个未被捕获的异常，触发全局异常处理器
+    raise ValueError("这是一个测试用的服务器内部错误")
+```
+
+### 测试异常处理系统
+
+#### 启动应用
+
+```bash
+uv run --env-file env.dev -- fastapi dev
+```
+
+#### 测试各种异常
+
+访问以下端点测试异常处理：
+
+1. **404 异常**：`http://127.0.0.1:8000/test-exceptions/not-found`
+   - 返回：`{"detail": "测试资源未找到"}`，状态码 404
+
+2. **409 冲突异常**：`http://127.0.0.1:8000/test-exceptions/already-exists`
+   - 返回：`{"detail": "测试资源已存在"}`，状态码 409
+
+3. **401 未授权异常**：`http://127.0.0.1:8000/test-exceptions/unauthorized`
+   - 返回：`{"detail": "测试未授权访问"}`，状态码 401
+
+4. **403 禁止访问异常**：`http://127.0.0.1:8000/test-exceptions/forbidden`
+   - 返回：`{"detail": "测试禁止访问"}`，状态码 403
+
+5. **500 服务器错误**：`http://127.0.0.1:8000/test-exceptions/server-error`
+   - 返回：`{"detail": "Internal server error"}`，状态码 500
+   - 控制台会记录详细的异常堆栈信息
+
+### 异常处理系统的优势
+
+1. **语义化**：异常名称直接表达业务含义，代码更易读
+2. **可复用**：一次定义，全项目使用，避免重复代码
+3. **集中管理**：所有异常定义集中在一个文件中，便于维护
+4. **职责分离**：业务层只关心"发生了什么"，不关心"返回什么状态码"
+5. **安全性**：全局异常处理器确保敏感信息不会泄露给客户端
+6. **可观测性**：详细的日志记录帮助快速定位和解决问题
+
+### 在实际业务中的应用
+
+在后续的用户管理、数据库操作等功能中，我们可以这样使用：
+
+```python
+# 在用户服务中
+if not user:
+    raise NotFoundException(f"用户 {user_id} 不存在")
+
+if existing_user:
+    raise AlreadyExistsException(f"用户名 {username} 已被占用")
+
+# 在权限检查中
+if not has_permission:
+    raise ForbiddenException("您没有权限执行此操作")
+```
+
+这样的代码既清晰又专业，为后续的仓库层和路由层开发奠定了坚实的基础。
+
+## 深入仓库层(Repository)，实现优雅的数据库操作
+
