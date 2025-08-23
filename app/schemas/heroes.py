@@ -1,5 +1,7 @@
 # app/schemas/heroes.py
 from pydantic import BaseModel
+from typing import Literal # 👈 确保导入 Literal
+
 
 # 基础模型，定义了所有Hero共有的字段
 class HeroBase(BaseModel):
@@ -41,10 +43,18 @@ class Pagination(BaseModel):
     previousPage: int | None # 可能没有上一页
     nextPage: int | None     # 可能没有下一页
 
-# 2. 排序信息模型
-class Sort(BaseModel):
+
+# ----------------- 我们改造多条件排序的起点 -----------------
+# 1. 新增一个用于描述单条排序规则的模型
+class OrderByRule(BaseModel):
     field: str
-    direction: str # "asc" 或 "desc"
+    dir: Literal["asc", "desc"] = "asc" # 方向只能是 "asc" 或 "desc"
+
+# 2. 修改 Sort 模型，使其包含一个规则列表
+class Sort(BaseModel):
+    fields: list[OrderByRule]
+
+# ----------------- 我们改造多条件排序的终点 -----------------
 
 # 3. 过滤信息模型
 class Filters(BaseModel):

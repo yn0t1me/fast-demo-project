@@ -41,8 +41,7 @@ class HeroRepository:
         self,
         *,
         search: str | None = None,
-        order_by: str = "id",
-        direction: str = "asc",
+        order_by: list[str] | None = None, # 👈 参数从 str 改为 list[str]
         limit: int = 10,
         offset: int = 0,
     ) -> tuple[int, list[Hero]]:
@@ -57,12 +56,36 @@ class HeroRepository:
                     Hero.powers.ilike(f"%{search}%"), # 别忘了我们新增的 powers 字段
                 )
             )
+# ----------------- 我们改造多条件排序的起点 -----------------
+        # 2. 排序逻辑 (全新重构)
+        ordering_clauses = [] # 用于存放 SQLAlchemy 的排序子句
 
-        # 2. 排序逻辑
-        # 使用 getattr 安全地获取排序字段，找不到就用 id
-        order_column = getattr(Hero, order_by, Hero.id)
-        query = query.order_by(desc(order_column) if direction == "desc" else asc(order_column))
+        if order_by:
+            for field_str in order_by:
+                # a. 解析排序方向
+                is_desc = field_str.startswith("-")
+                # b. 获取纯净的字段名
+                field_name = field_str.lstrip("-")
+                # c. 安全性检查：跳过模型中不存在的字段
+                if not hasattr(Hero, field_name):
+                    continue
+            
+                # d. 获取 SQLAlchemy 的列对象
+                column = getattr(Hero, field_name)
+                # e. 添加排序子句到列表
+                ordering_clauses.append(desc(column) if is_desc else asc(column))
 
+        # 3. 注入默认的次要和最终排序规则
+        #    a. 如果用户没有指定按 name 排序，我们默认追加一个 name 升序
+        if not any(f.lstrip("-") == "name" for f in (order_by or [])):
+            ordering_clauses.append(asc(Hero.name))
+
+        #    b. 追加一个最终的、稳定的排序规则，确保每次查询结果顺序一致
+        ordering_clauses.append(asc(Hero.id))
+    
+        # 4. 应用所有排序规则
+        query = query.order_by(*ordering_clauses)
+# ----------------- 我们改造多条件排序的终点 -----------------
         # 3. 获取总数 (分页前)
         # 先构建一个只查 count 的查询
         count_query = select(func.count()).select_from(query.subquery())

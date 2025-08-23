@@ -20,16 +20,14 @@ class HeroService:
         self,
         *,
         search: str | None,
-        order_by: str,
-        direction: str,
+        order_by: list[str] | None = None,
         limit: int,
-        offset: int,
+        offset: int,    
     ) -> tuple[int, list[HeroResponse]]:
         # 1. 透明地将参数传递给仓库层
         total, heroes_orm = await self.repository.get_all(
             search=search,
             order_by=order_by,
-            direction=direction,
             limit=limit,
             offset=offset,
         )
