@@ -613,10 +613,10 @@ touch app/db/__init__.py
 
 第 4 部分：create_db_and_tables 是一个方便的开发工具，我们可以在启动时调用它来确保所有表都已创建。
 
-在 `app/db/session.py` 中实现数据库连接系统：
+在 `app/core/database.py` 中实现数据库连接系统：
 
 ```python
-# /fastapi-demo-project/app/db/session.py
+# /fastapi-demo-project/app/core/database.py
 from typing import Optional, AsyncGenerator
 from sqlalchemy.ext.asyncio import (
     create_async_engine,
@@ -718,7 +718,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # 从 config 模块导入 get_settings 函数和 get_project_version 函数
 from app.core.config import Settings, get_settings, get_project_version, settings
 # 从 core.database 模块导入 setup_database_connection 和 close_database_connection 函数
-from app.db.session import (
+from app.core.database import (
     setup_database_connection,
     close_database_connection,
     create_db_and_tables,
@@ -1045,7 +1045,7 @@ __all__ = ["Base", "User"]
 
 #### 修复数据库会话模块
 
-更新 `app/db/session.py`，使用统一的 Base 类：
+更新 `app/core/database.py`，使用统一的 Base 类：
 
 ```python
 # 在文件顶部，移除原来的 Base 定义，改为导入
@@ -1692,7 +1692,7 @@ Depends 的"魔法"并非凭空产生，它背后是一套清晰、严谨的"依
 一切依赖的源头，是我们对数据库的连接。在讲解数据库连接的文章中，我们创建了一个至关重要的函数：
 
 ```python
-# 来自 app/db/session.py
+# 来自 app/core/database.py
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """为每个请求提供一个独立的、自动管理的数据库会话。"""
     if _SessionFactory is None:
@@ -1835,7 +1835,7 @@ from loguru import logger
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.session import get_db
+from app.core.database import get_db
 from app.domains.heroes.heroes_repository import HeroRepository
 from app.domains.heroes.heroes_services import HeroService
 from app.schemas.heroes import HeroCreate, HeroUpdate, HeroResponse, HeroStoryResponse
@@ -2489,3 +2489,375 @@ uv run alembic check                     # 检查模型与数据库一致性
 ```
 
 Alembic 的能力远不止于此。对于更复杂的场景，比如需要进行数据回填（给老数据的 `powers` 列填充默认值）、处理复杂的外键约束变更等，就需要我们手动去编写迁移脚本的逻辑
+
+## 构建优雅的数据响应，让你的 API 返回不再只是一个简单列表
+
+在前面的章节中，我们成功构建了完整的三层架构，实现了基础的 CRUD 操作。但是，当我们的应用真正投入使用时，会发现一个严重的问题：`GET /api/v1/heroes` 接口只是简单地返回所有英雄的列表，没有分页、搜索、排序等功能。
+
+想象一下，如果数据库中有几千个英雄，一次性返回所有数据不仅会导致：
+- **性能问题**：大量数据传输导致响应缓慢
+- **用户体验差**：前端无法有效展示和操作大量数据
+- **资源浪费**：不必要的网络和内存消耗
+
+本章将带你构建一个专业级的数据响应系统，实现分页、搜索、排序等高级功能。
+
+### 设计理念：结构化的数据响应
+
+专业的 API 不应该只返回一个简单的数组，而应该返回一个结构化的对象，包含：
+
+```json
+{
+  "data": [...],           // 实际数据
+  "pagination": {...},     // 分页信息
+  "sort": {...},           // 排序信息
+  "filters": {...}         // 过滤信息
+}
+```
+
+这种设计的优势：
+- **前端友好**：前端可以直接获取分页、排序等元信息
+- **可扩展性**：未来可以轻松添加新的元数据字段
+- **一致性**：所有列表接口都遵循相同的响应格式
+
+### 第一步：设计响应模型
+
+#### 更新 Pydantic 模型
+
+```python
+# --- 新增的返回结构模型 ---
+
+# 1. 分页信息模型
+class Pagination(BaseModel):
+    currentPage: int
+    totalPages: int
+    totalItems: int
+    limit: int
+    hasMore: bool
+    previousPage: int | None # 可能没有上一页
+    nextPage: int | None     # 可能没有下一页
+
+# 2. 排序信息模型
+class Sort(BaseModel):
+    field: str
+    direction: str # "asc" 或 "desc"
+
+# 3. 过滤信息模型
+class Filters(BaseModel):
+    search: str | None
+
+# 4. 最终的、集大成的列表响应模型
+class HeroListResponse(BaseModel):
+    data: list[HeroResponse] # 数据本身是一个 HeroResponse 列表
+    pagination: Pagination   # 嵌套 Pagination 模型
+    sort: Sort               # 嵌套 Sort 模型
+    filters: Filters           # 嵌套 Filters 模型
+```
+
+
+
+
+
+### 第二步：增强仓库层查询能力
+
+#### 升级 HeroRepository
+
+```python
+# app/domains/heroes/heroes_repository.py
+from sqlalchemy import select, func, or_, desc, asc
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.exceptions import AlreadyExistsException, NotFoundException
+from app.models.heroes import Hero
+from app.schemas.heroes import HeroCreate, HeroUpdate
+
+class HeroRepository:
+    """Repository for handling hero database operations."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    # 基础方法保持不变...
+
+    # 🚀 升级版的 get_all 方法
+    async def get_all(
+        self,
+        *,
+        search: str | None = None,
+        order_by: str = "id",
+        direction: str = "asc",
+        limit: int = 10,
+        offset: int = 0,
+    ) -> tuple[int, list[Hero]]:
+        query = select(Hero)
+
+        # 1. 搜索/过滤逻辑
+        if search:
+            query = query.where(
+                or_(
+                    Hero.name.ilike(f"%{search}%"),
+                    Hero.alias.ilike(f"%{search}%"),
+                    Hero.powers.ilike(f"%{search}%"), # 别忘了我们新增的 powers 字段
+                )
+            )
+
+        # 2. 排序逻辑
+        # 使用 getattr 安全地获取排序字段，找不到就用 id
+        order_column = getattr(Hero, order_by, Hero.id)
+        query = query.order_by(desc(order_column) if direction == "desc" else asc(order_column))
+
+        # 3. 获取总数 (分页前)
+        # 先构建一个只查 count 的查询
+        count_query = select(func.count()).select_from(query.subquery())
+        total = (await self.session.scalar(count_query)) or 0
+
+        # 4. 分页获取数据
+        paginated_query = query.offset(offset).limit(limit)
+        items = list(await self.session.scalars(paginated_query))
+      
+        return total, items
+
+    # 其他方法保持不变...
+```
+
+**关键实现要点**：
+
+1. **返回元组**：`tuple[int, list[Hero]]` 同时返回总数和当前页数据
+2. **灵活搜索**：使用 `or_()` 和 `ilike()` 实现多字段模糊搜索
+3. **安全排序**：使用 `getattr()` 防止无效字段导致的错误
+4. **高效计数**：使用子查询避免重复的过滤逻辑
+
+
+
+### 第三步：升级服务层
+
+#### 更新 HeroService
+
+```python
+# app/domains/heroes/heroes_services.py
+from app.domains.heroes.heroes_repository import HeroRepository
+from app.schemas.heroes import (
+    HeroCreate, HeroUpdate, HeroResponse, HeroStoryResponse
+)
+
+class HeroService:
+    def __init__(self, repository: HeroRepository):
+        self.repository = repository
+
+    # 基础方法保持不变...
+
+    # 🚀 升级版的 get_heroes 方法
+    # 👇 更新 get_heroes 方法
+    async def get_heroes(
+        self,
+        *,
+        search: str | None,
+        order_by: str,
+        direction: str,
+        limit: int,
+        offset: int,
+    ) -> tuple[int, list[HeroResponse]]:
+        # 1. 透明地将参数传递给仓库层
+        total, heroes_orm = await self.repository.get_all(
+            search=search,
+            order_by=order_by,
+            direction=direction,
+            limit=limit,
+            offset=offset,
+        )
+      
+        # 2. 将 ORM 对象列表转换为 Pydantic 模型列表
+        heroes_schema = [HeroResponse.model_validate(h) for h in heroes_orm]
+      
+        # 3. 返回元组
+        return total, heroes_schema
+
+    # 其他方法保持不变...
+
+```
+
+### 第四步：构建强大的路由层
+
+#### 升级 API 路由
+
+```python
+# app/api/v1/heroes_route.py
+from loguru import logger
+from fastapi import APIRouter, Depends, status, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_db
+from app.domains.heroes.heroes_repository import HeroRepository
+from app.domains.heroes.heroes_services import HeroService
+from app.schemas.heroes import (
+    HeroCreate, HeroUpdate, HeroResponse, HeroStoryResponse,
+    HeroListResponse, Pagination, Sort, Filters
+)
+
+router = APIRouter(prefix="/heroes", tags=["Heroes"])
+
+def get_hero_service(session: AsyncSession = Depends(get_db)) -> HeroService:
+    repository = HeroRepository(session)
+    return HeroService(repository)
+
+# 基础路由保持不变...
+
+
+# 🚀 全新的列表路由
+@router.get("", response_model=HeroListResponse)
+async def list_heroes(
+    # --- 使用 Query 定义更丰富的查询参数 ---
+    search: str | None = Query(None, description="按名称、别名、能力进行模糊搜索"),
+    order_by: str = Query("id", description="排序字段：name, alias, id"),
+    direction: str = Query("asc", description="排序方向", regex="^(asc|desc)$"),
+    page: int = Query(1, ge=1, description="页码"),
+    limit: int = Query(10, ge=1, le=100, description="每页数量"),
+    # --- 依赖注入不变 ---
+    service: HeroService = Depends(get_hero_service),
+) -> HeroListResponse:
+    try:
+        # 1. 计算 offset
+        offset = (page - 1) * limit
+
+        # 2. 从服务层获取数据
+        total, heroes = await service.get_heroes(
+            search=search,
+            order_by=order_by,
+            direction=direction,
+            limit=limit,
+            offset=offset,
+        )
+
+        # 3. 计算分页信息
+        total_pages = (total + limit - 1) // limit
+
+        # 4. 组装最终的返回对象
+        return HeroListResponse(
+            data=heroes,
+            pagination=Pagination(
+                currentPage=page,
+                totalPages=total_pages,
+                totalItems=total,
+                limit=limit,
+                hasMore=page < total_pages,
+                previousPage=page - 1 if page > 1 else None,
+                nextPage=page + 1 if page < total_pages else None,
+            ),
+            sort=Sort(field=order_by, direction=direction),
+            filters=Filters(search=search),
+        )
+    except Exception as e:
+        logger.error(f"Failed to fetch heroes: {e}")
+        raise
+
+# 其他路由保持不变...
+
+```
+
+**Query 参数的精妙设计**：
+
+1. **类型安全**：使用类型注解确保参数类型正确
+2. **验证约束**：`ge=1` 确保页码大于等于1，`le=100` 限制每页最大数量
+3. **正则验证**：`regex="^(asc|desc)$"` 确保排序方向只能是 asc 或 desc
+4. **自动文档**：`description` 参数会自动生成到 OpenAPI 文档中
+
+
+
+### 第五步：测试新功能
+
+#### 启动应用并测试
+
+```bash
+# 启动开发服务器
+uv run --env-file env.dev -- fastapi dev
+```
+
+#### 测试各种查询场景
+
+1. **基础分页**：
+   
+   ```
+   GET /api/v1/heroes?page=1&limit=5
+   ```
+   
+2. **搜索功能**：
+   ```
+   GET /api/v1/heroes?search=spider&page=1&limit=10
+   ```
+
+3. **排序功能**：
+   ```
+   GET /api/v1/heroes?order_by=name&direction=desc&page=1&limit=10
+   ```
+
+4. **组合查询**：
+   ```
+   GET /api/v1/heroes?search=man&order_by=alias&direction=asc&page=2&limit=5
+   ```
+
+#### 响应示例
+
+```json
+{
+  "data": [
+    {
+      "name": "Peter Parker",
+      "alias": "Spider-Man",
+      "id": 1
+    },
+    {
+      "name": "Tony Stark",
+      "alias": "Iron Man",
+      "id": 2
+    },
+    ...
+    {
+      "name": "Arthur Curry",
+      "alias": "Aquaman",
+      "id": 10
+    }
+  ],
+  "pagination": {
+    "currentPage": 1,
+    "totalPages": 2,
+    "totalItems": 15,
+    "limit": 10,
+    "hasMore": true,
+    "previousPage": null,
+    "nextPage": 2
+  },
+  "sort": {
+    "field": "id",
+    "direction": "asc"
+  },
+  "filters": {
+    "search": null
+  }
+}
+```
+
+### 架构优势总结
+
+通过这次升级，我们的 API 具备了以下专业特性：
+
+1. **性能优化**：
+   - 分页避免了大量数据传输
+   - 数据库层面的高效查询和计数
+   - 合理的默认限制（每页最多100条）
+
+2. **用户体验**：
+   - 丰富的元数据帮助前端构建分页组件
+   - 灵活的搜索和排序功能
+   - 清晰的参数验证和错误提示
+
+3. **可维护性**：
+   - 三层架构保持清晰的职责分离
+   - 类型安全的参数传递
+   - 统一的响应格式便于前端处理
+
+4. **可扩展性**：
+   - 响应模型易于扩展新的元数据字段
+   - 查询参数可以轻松添加新的过滤条件
+   - 仓库层的设计支持更复杂的查询需求
+
+这种设计不仅解决了当前的需求，更为未来的功能扩展奠定了坚实的基础。无论是添加新的过滤条件、支持更复杂的排序，还是集成缓存和搜索引擎，这个架构都能够优雅地适应变化。

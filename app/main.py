@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # 从 config 模块导入 get_settings 函数和 get_project_version 函数
 from app.core.config import Settings, get_settings, get_project_version, settings
 # 从 core.database 模块导入 setup_database_connection 和 close_database_connection 函数
-from app.db.session import (
+from app.core.database import (
     setup_database_connection,
     close_database_connection,
     create_db_and_tables,

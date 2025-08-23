@@ -15,9 +15,30 @@ class HeroService:
         hero = await self.repository.get_by_id(hero_id)
         return HeroResponse.model_validate(hero)
 
-    async def get_heroes(self,) -> list[HeroResponse]:
-        heroes = await self.repository.get_all()        
-        return [HeroResponse.model_validate(hero) for hero in heroes]
+    # 👇 更新 get_heroes 方法
+    async def get_heroes(
+        self,
+        *,
+        search: str | None,
+        order_by: str,
+        direction: str,
+        limit: int,
+        offset: int,
+    ) -> tuple[int, list[HeroResponse]]:
+        # 1. 透明地将参数传递给仓库层
+        total, heroes_orm = await self.repository.get_all(
+            search=search,
+            order_by=order_by,
+            direction=direction,
+            limit=limit,
+            offset=offset,
+        )
+      
+        # 2. 将 ORM 对象列表转换为 Pydantic 模型列表
+        heroes_schema = [HeroResponse.model_validate(h) for h in heroes_orm]
+      
+        # 3. 返回元组
+        return total, heroes_schema
 
     async def update_hero(self, data: HeroUpdate, hero_id: int) -> HeroResponse:
         hero = await self.repository.update(data, hero_id)

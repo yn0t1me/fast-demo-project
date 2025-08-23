@@ -1,4 +1,4 @@
-# /fastapi-demo-project/app/db/session.py
+# /fastapi-demo-project/app/core/database.py
 from typing import Optional, AsyncGenerator
 from sqlalchemy.ext.asyncio import (
     create_async_engine,
@@ -11,13 +11,30 @@ from app.core.config import settings
 # 导入统一的 Base 类
 from app.models.base import Base
 
-# --- 1. 核心组件：全局引擎与会话工厂 ---
+# --- 1. 全局变量定义 ---
 _engine: Optional[AsyncEngine] = None
 _SessionFactory: Optional[async_sessionmaker[AsyncSession]] = None
 
-# --- 2. 生命周期钩子：初始化与关闭 ---
+def get_engine() -> AsyncEngine:
+    if _engine is None:
+        raise RuntimeError("数据库引擎未初始化. 请先调用 setup_database_connection")
+    return _engine
+
+
+def get_session_factory() -> async_sessionmaker[AsyncSession]:
+    if _SessionFactory is None:
+        raise RuntimeError("会话工厂未初始化. 请先调用 setup_database_connection")
+    return _SessionFactory
+
+
+# --- 2. 通用的数据库初始化和关闭函数 ---
+# 这些函数现在是通用的，可以在任何需要初始化数据库的地方调用。
+# 它们负责设置全局的 engine 和 SessionFactory。
 async def setup_database_connection():
-    """在应用启动时，初始化全局的数据库引擎和会话工厂。"""
+    """
+    初始化全局的数据库引擎和会话工厂。
+    这是一个通用的设置函数，可以在 FastAPI 启动时调用。
+    """
     global _engine, _SessionFactory
     
     if _engine is not None:
@@ -79,4 +96,4 @@ async def create_db_and_tables():
     async with _engine.begin() as conn:
         # 让 SQLAlchemy 根据所有继承了 Base 的模型类去创建表
         await conn.run_sync(Base.metadata.create_all)
-    logger.info("数据库表已成功同步/创建。")
+        logger.info("数据库表已成功同步/创建。")
