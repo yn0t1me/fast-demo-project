@@ -2,12 +2,12 @@
 from loguru import logger
 from fastapi import APIRouter, Depends, status, Query # 👈 新增 Query
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from fastapi_filter import FilterDepends # 👈 导入魔法依赖项
 from app.core.database import get_db
 from app.domains.heroes.heroes_repository import HeroRepository
 from app.domains.heroes.heroes_services import HeroService
-from app.schemas.heroes import HeroCreate, HeroUpdate, HeroResponse, HeroStoryResponse, HeroListResponse, Pagination, Sort, Filters
-
+from app.schemas.heroes import HeroCreate, HeroUpdate, HeroResponse, HeroStoryResponse, HeroListResponse, Pagination, Sort, Filters, OrderByRule
+from app.schemas.heroes_filter import HeroFilter
 
 router = APIRouter(prefix="/heroes", tags=["Heroes"])
 
@@ -34,14 +34,8 @@ async def create_hero(
 
 @router.get("", response_model=HeroListResponse)
 async def list_heroes(
-    # --- 使用 Query 定义更丰富的查询参数 ---
-    search: str | None = Query(None, description="按名称、别名、能力进行模糊搜索"),
-    # 👇 Query 现在接收一个字符串列表
-    order_by: list[str] | None = Query(
-        None,
-        description="排序字段列表, 如 '-name,alias'。'-'前缀表示降序, 默认升序。",
-        example=["-name", "alias"], # 在文档中提供清晰的示例
-    ),
+    # 👇 见证奇迹的一行！
+    hero_filter: HeroFilter = FilterDepends(HeroFilter),
     page: int = Query(1, ge=1, description="页码"),
     limit: int = Query(10, ge=1, le=100, description="每页数量"),
     # --- 依赖注入不变 ---
@@ -52,23 +46,19 @@ async def list_heroes(
 
         # 1. 将原始的字符串列表 ['-name', 'alias'] 直接传给服务层，从服务层获取数据
         total, heroes = await service.get_heroes(
-            search=search,
-            order_by=order_by,
+            hero_filter=hero_filter, # 将构建好的 filter 对象传递下去
             limit=limit,
             offset=offset,
         )
         total_pages = (total + limit - 1) // limit
 
-        # 2. 将字符串列表转换为结构化的 OrderByRule 列表，用于最终返回
-        order_rules = []
-        if order_by:
-            order_rules = [
-                OrderByRule(
-                    field=field.lstrip("-"), 
-                    dir="desc" if field.startswith("-") else "asc"
-                )
-                for field in order_by
-            ]
+        # --- 返回结构组装逻辑 (与之前类似) ---
+        # 注意: order_by 现在可能是逗号分隔的字符串，需要处理
+        order_by_list = hero_filter.order_by[0].split(',') if hero_filter.order_by else []
+        order_rules = [
+            OrderByRule(field=f.lstrip("-"), dir="desc" if f.startswith("-") else "asc")
+            for f in order_by_list
+        ]
 
         # 4. 组装最终的返回对象
         return HeroListResponse(
@@ -83,7 +73,7 @@ async def list_heroes(
                 nextPage=page + 1 if page < total_pages else None,
             ),
             sort=Sort(fields=order_rules), # 👈 使用组装好的规则列表
-            filters=Filters(search=search),
+            filters=Filters(search=hero_filter.search),
         )
     except Exception as e:
         logger.error(f"Failed to fetch heroes: {e}")

@@ -1,6 +1,8 @@
 # app/domains/heroes/heroes_services.py
 from app.domains.heroes.heroes_repository import HeroRepository
 from app.schemas.heroes import HeroCreate, HeroUpdate, HeroResponse, HeroStoryResponse
+from app.schemas.heroes_filter import HeroFilter
+
 
 class HeroService:
     def __init__(self, repository: HeroRepository):
@@ -19,15 +21,13 @@ class HeroService:
     async def get_heroes(
         self,
         *,
-        search: str | None,
-        order_by: list[str] | None = None,
+        hero_filter: HeroFilter, # 👈 只需同步参数类型
         limit: int,
         offset: int,    
     ) -> tuple[int, list[HeroResponse]]:
         # 1. 透明地将参数传递给仓库层
         total, heroes_orm = await self.repository.get_all(
-            search=search,
-            order_by=order_by,
+            hero_filter=hero_filter,
             limit=limit,
             offset=offset,
         )
