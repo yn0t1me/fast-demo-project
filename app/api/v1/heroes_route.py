@@ -2,6 +2,7 @@
 from loguru import logger
 from fastapi import APIRouter, Depends, status, Query # 👈 新增 Query
 from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi_pagination import Page, Params
 
 from app.core.database import get_db
 from app.domains.heroes.heroes_repository import HeroRepository
@@ -32,7 +33,7 @@ async def create_hero(
         raise
 
 
-@router.get("", response_model=HeroListResponse)
+@router.get("", response_model=Page[HeroResponse])
 async def list_heroes(
     # --- 使用 Query 定义更丰富的查询参数 ---
     search: str | None = Query(None, description="按名称、别名、能力进行模糊搜索"),
@@ -42,52 +43,17 @@ async def list_heroes(
         description="排序字段列表, 如 '-name,alias'。'-'前缀表示降序, 默认升序。",
         example=["-name", "alias"], # 在文档中提供清晰的示例
     ),
-    page: int = Query(1, ge=1, description="页码"),
-    limit: int = Query(10, ge=1, le=100, description="每页数量"),
+    # 👇 分页参数由这一个依赖项搞定
+    params: Params = Depends(),
     # --- 依赖注入不变 ---
     service: HeroService = Depends(get_hero_service),
-) -> HeroListResponse:
-    try:
-        offset = (page - 1) * limit
-
-        # 1. 将原始的字符串列表 ['-name', 'alias'] 直接传给服务层，从服务层获取数据
-        total, heroes = await service.get_heroes(
-            search=search,
-            order_by=order_by,
-            limit=limit,
-            offset=offset,
-        )
-        total_pages = (total + limit - 1) // limit
-
-        # 2. 将字符串列表转换为结构化的 OrderByRule 列表，用于最终返回
-        order_rules = []
-        if order_by:
-            order_rules = [
-                OrderByRule(
-                    field=field.lstrip("-"), 
-                    dir="desc" if field.startswith("-") else "asc"
-                )
-                for field in order_by
-            ]
-
-        # 4. 组装最终的返回对象
-        return HeroListResponse(
-            data=heroes,
-            pagination=Pagination(
-                currentPage=page,
-                totalPages=total_pages,
-                totalItems=total,
-                limit=limit,
-                hasMore=page < total_pages,
-                previousPage=page - 1 if page > 1 else None,
-                nextPage=page + 1 if page < total_pages else None,
-            ),
-            sort=Sort(fields=order_rules), # 👈 使用组装好的规则列表
-            filters=Filters(search=search),
-        )
-    except Exception as e:
-        logger.error(f"Failed to fetch heroes: {e}")
-        raise
+) -> Page[HeroResponse]:
+    # 直接调用服务层，几乎没有额外逻辑
+    return await service.get_heroes(
+        search=search,
+        order_by=order_by,
+        params=params,
+    )
 
 
 @router.get("/{hero_id}", response_model=HeroResponse)

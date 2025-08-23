@@ -4,6 +4,7 @@ from fastapi import Depends, FastAPI
 from contextlib import asynccontextmanager
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi_pagination import add_pagination
 # 从 config 模块导入 get_settings 函数和 get_project_version 函数
 from app.core.config import Settings, get_settings, get_project_version, settings
 # 从 core.database 模块导入 setup_database_connection 和 close_database_connection 函数
@@ -45,6 +46,9 @@ app = FastAPI(
     lifespan=lifespan
 
 )
+
+# 添加全局分页支持
+add_pagination(app)
 
 # 将 global_exception_handler 注册为处理所有 Exception 类型（及其子类）的处理器
 # 这会捕获所有类型为 Exception 的异常

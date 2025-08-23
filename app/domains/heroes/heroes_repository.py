@@ -42,9 +42,10 @@ class HeroRepository:
         *,
         search: str | None = None,
         order_by: list[str] | None = None, # 👈 参数从 str 改为 list[str]
-        limit: int = 10,
-        offset: int = 0,
-    ) -> tuple[int, list[Hero]]:
+        # 👇 limit 和 offset 变为可选，且无默认值
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> list[Hero]: # 👈 返回值变为纯粹的 list[Hero]
         query = select(Hero)
 
         # 1. 搜索/过滤逻辑
@@ -86,16 +87,16 @@ class HeroRepository:
         # 4. 应用所有排序规则
         query = query.order_by(*ordering_clauses)
 # ----------------- 我们改造多条件排序的终点 -----------------
-        # 3. 获取总数 (分页前)
-        # 先构建一个只查 count 的查询
-        count_query = select(func.count()).select_from(query.subquery())
-        total = (await self.session.scalar(count_query)) or 0
 
-        # 4. 分页获取数据
-        paginated_query = query.offset(offset).limit(limit)
-        items = list(await self.session.scalars(paginated_query))
-      
-        return total, items
+        # 2. 纯粹的分页逻辑
+        if offset is not None:
+            query = query.offset(offset)
+        if limit is not None:
+            query = query.limit(limit)
+
+        # 3. 执行查询并返回列表
+        result = await self.session.scalars(query)
+        return list(result)
 
     async def update(self, hero_data: HeroUpdate, hero_id: int) -> Hero:
         """Update an existing hero."""

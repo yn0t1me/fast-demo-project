@@ -1,4 +1,6 @@
 # app/domains/heroes/heroes_services.py
+from fastapi_pagination import Page, Params, paginate   # 👈 导入内存分页函数
+
 from app.domains.heroes.heroes_repository import HeroRepository
 from app.schemas.heroes import HeroCreate, HeroUpdate, HeroResponse, HeroStoryResponse
 
@@ -21,22 +23,20 @@ class HeroService:
         *,
         search: str | None,
         order_by: list[str] | None = None,
-        limit: int,
-        offset: int,    
-    ) -> tuple[int, list[HeroResponse]]:
-        # 1. 透明地将参数传递给仓库层
-        total, heroes_orm = await self.repository.get_all(
+        params: Params,  # 👈 接收来自 fastapi-pagination 的分页参数
+    ) -> Page[HeroResponse]: # 👈 返回值是 Page[HeroResponse]
+        # 1. 从仓库获取 **所有** 过滤和排序后的数据
+        heroes_orm_list = await self.repository.get_all(
             search=search,
             order_by=order_by,
-            limit=limit,
-            offset=offset,
+            # 注意：这里不传递 limit 和 offset
         )
       
         # 2. 将 ORM 对象列表转换为 Pydantic 模型列表
-        heroes_schema = [HeroResponse.model_validate(h) for h in heroes_orm]
+        heroes_dto_list = [HeroResponse.model_validate(h) for h in heroes_orm_list]
       
-        # 3. 返回元组
-        return total, heroes_schema
+        # 3. 使用 paginate 函数对内存中的列表进行分页
+        return paginate(heroes_dto_list, params)
 
     async def update_hero(self, data: HeroUpdate, hero_id: int) -> HeroResponse:
         hero = await self.repository.update(data, hero_id)
